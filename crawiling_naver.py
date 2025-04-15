@@ -198,8 +198,8 @@ class NaverCrawler:
         time.sleep(delay_time)
 
         
-    def save_property_datail(data, property_type, item_id, save_dir):
-        txt_path = os.path.join(save_dir, f"{property_type}_{item_id}" + ".txt")
+    def save_property_datail(data, item_id, save_dir):
+        txt_path = os.path.join(save_dir, f"{item_id}" + ".txt")
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, indent=2, ensure_ascii=False))
 
@@ -401,7 +401,7 @@ class NaverCrawler:
                 )
                 print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 요청 중 에러 발생 → {e}")
 
-    def crawl_property_datail(self, data_dir, property_type, area_id):
+    def crawl_property_datail(self, data_dir, area_id):
         """
         crawled_data/
         │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
@@ -480,7 +480,7 @@ class NaverCrawler:
                 
                 if response.status_code == 200:
                     data = response.json()
-                    self.save_property_datail(data, property_type, item_id, property_list_dir)
+                    self.save_property_datail(data, item_id, property_list_dir)
                     # 성공 status 기록
                     self.update_status(
                         status="success",
