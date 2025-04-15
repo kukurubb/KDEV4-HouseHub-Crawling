@@ -21,5 +21,5 @@ if __name__ == "__main__":
         lon = coordinates.loc[i, 'longitude']
 
         # 크롤링 수행
-        crawler.crawl_item_ids(data_dir, area_id, lat, lon, view)
-        # crawler.crawl_property_datail(data_dir, area_id)
+        # crawler.crawl_item_ids(data_dir, area_id, lat, lon, view)
+        crawler.crawl_property_datail(data_dir, area_id)

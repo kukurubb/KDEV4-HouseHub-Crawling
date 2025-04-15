@@ -20,10 +20,8 @@ import pandas as pd
 
 """
 지금 여기 추가해야 하는 기능
-1. 코드 실행 시 저장 경로를 먼저 생성
-2. 이미 매물이 사라져서 에러값이 들어오는 경우 삭제처리
-3. 중복 매물 제거
-4. 크롤링 할 위치의 위도 경도를 데이터 저장 폴더에서 문서로 기록할 것
+1. 이미 매물이 사라져서 에러값이 들어오는 경우 삭제처리
+2. 중복 매물 제거
 """
 
 
@@ -198,7 +196,7 @@ class NaverCrawler:
         time.sleep(delay_time)
 
         
-    def save_property_datail(data, item_id, save_dir):
+    def save_property_datail(self, data, item_id, save_dir):
         txt_path = os.path.join(save_dir, f"{item_id}" + ".txt")
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, indent=2, ensure_ascii=False))
@@ -262,10 +260,10 @@ class NaverCrawler:
             └── 2500003.txt
         """
         # 파일 생성
-        page_list_dir = "./page_list"
-        page_list_csv_path = os.path.join(data_dir, page_list_dir, f"{area_id}.csv")
-        id_list_dir = "./id_list"
-        id_list_csv_path = os.path.join(data_dir, id_list_dir, f"{area_id}.csv")
+        page_list_dir = os.path.join(data_dir, "page_list")
+        page_list_csv_path = os.path.join(page_list_dir, f"{area_id}.csv")
+        id_list_dir = os.path.join(data_dir, "id_list")
+        id_list_csv_path = os.path.join(id_list_dir, f"{area_id}.csv")
 
         self.create_csv(
             dir=page_list_dir,
@@ -421,9 +419,9 @@ class NaverCrawler:
             └── 2500003.txt
         """
         # 파일 생성
-        id_list_dir = "./id_list"
+        id_list_dir = os.path.join(data_dir, "id_list")
         id_list_csv_path = os.path.join(data_dir, id_list_dir, f"{area_id}.csv")
-        property_list_dir = "./property_list"
+        property_list_dir = os.path.join(data_dir, "property_list")
         self.make_dir(property_list_dir)
 
         # 옵션 설정
