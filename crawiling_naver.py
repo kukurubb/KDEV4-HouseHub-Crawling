@@ -16,13 +16,7 @@ import math
 import random
 import os
 import pandas as pd
-
-
-"""
-지금 여기 추가해야 하는 기능
-1. 이미 매물이 사라져서 에러값이 들어오는 경우 삭제처리
-2. 중복 매물 제거
-"""
+from glob import glob
 
 
 class NaverCrawler:
@@ -88,7 +82,7 @@ class NaverCrawler:
 
                 # 버튼이 보이지 않을 경우 display 속성 강제로 block 설정
                 if not article_button.is_displayed():
-                    element.execute_script("arguments[0].style.display = 'block';", article_button)
+                    driver.execute_script("arguments[0].style.display = 'block';", article_button)
                     WebDriverWait(driver, 5).until(EC.visibility_of(article_button)) # 렌더링 대기
 
                 article_button.click()
@@ -421,7 +415,7 @@ class NaverCrawler:
         # 파일 생성
         id_list_dir = os.path.join(data_dir, "id_list")
         id_list_csv_path = os.path.join(data_dir, id_list_dir, f"{area_id}.csv")
-        property_list_dir = os.path.join(data_dir, "property_list")
+        property_list_dir = os.path.join(data_dir, "property_list", f"{area_id}")
         self.make_dir(property_list_dir)
 
         # 옵션 설정
@@ -465,7 +459,7 @@ class NaverCrawler:
                         value=item_id, # 매물 고유 아이디
                         csv_path=id_list_csv_path,
                     )
-                    print(f"[{progress_cnt:05}/{num_item_ids:05}] {item_id} cURL 정보 수신 실패")
+                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} cURL 정보 수신 실패")
                     continue
                 
                 # 데이터 수신
@@ -486,7 +480,7 @@ class NaverCrawler:
                         value=item_id, # 매물 고유 아이디
                         csv_path=id_list_csv_path,
                     )
-                    print(f"[{progress_cnt:05}/{num_item_ids:05}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
+                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
                 
                 else:
                     # 실패 status 기록
@@ -496,7 +490,7 @@ class NaverCrawler:
                         value=item_id, # 매물 고유 아이디
                         csv_path=id_list_csv_path,
                     )
-                    print(f"[{progress_cnt:05}/{num_item_ids:05}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
+                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
         
             except Exception as e:
                 # 네트워크 중단 status 기록
@@ -506,4 +500,40 @@ class NaverCrawler:
                     value=item_id, # 매물 고유 아이디
                     csv_path=id_list_csv_path,
                 )
-                print(f"[{progress_cnt:05}/{num_item_ids:05}] {item_id} 페이지 요청 중 에러 발생 → {e}")
+                print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
+
+    """
+    인접 좌표에 해당하는 매물 id 추출 후
+    기존 csv 파일에서 중복 매물 id 제거
+    """
+    def check_duplicate_property(self, item_id_csv_path, lat_idx, lon_idx, property_list_dir, area_name):
+        # 인접 좌표에 해당하는 매물 id 추출
+        neighbor_areas_property_ids = self.get_neighbor_areas_property_ids(property_list_dir, lat_idx, lon_idx, area_name)
+
+        # 기존 csv 파일에서 중복 매물 id 제거
+        property_id_df = pd.read_csv(item_id_csv_path)
+        property_id_df = property_id_df[property_id_df["item_id"].isin(neighbor_areas_property_ids)]
+        property_id_df.to_csv(item_id_csv_path, index=False)
+
+    def get_neighbor_areas_property_ids(self, property_list_dir, i, j, area_name):
+        # 인접 좌표 생성
+        neighbor_areas_indices = []
+        for di in [-1, 0, 1]:
+            for dj in [-1, 0, 1]:
+                ni, nj = i + di, j + dj
+                neighbor_areas_indices.append([ni, nj])
+
+        # 인접 좌표에 해당하는 폴더 경로가 존재하는지 체크
+        neighbor_areas_property_ids = []
+        for ni, nj in neighbor_areas_indices:
+            folder_name = f"{area_name}_{ni}_{nj}"
+            folder_path = os.path.join(property_list_dir, folder_name)
+
+            # 해당 폴더가 존재한다면 매물 id 추가
+            if os.path.isdir(folder_path):
+                txt_files_with_extension = os.listdir(folder_path) # 예시 2500000.txt
+                for txt_file_with_extension in txt_files_with_extension:
+                    ids = txt_file_with_extension.split(".")[0]
+                    neighbor_areas_property_ids.append(ids) # 예시 2500000
+
+        return neighbor_areas_property_ids
