@@ -321,8 +321,9 @@ class NaverCrawler:
         """
         # 페이지 번호 기록
         page_list_df = pd.read_csv(page_list_csv_path)
-        page_list_df["page"] = list(range(1, num_pages + 1))
-        page_list_df.to_csv(page_list_csv_path, index=False)
+        if len(page_list_df) == 0: # 페이지를 기록한 적이 있으면 다시 페이지를 기록하지 않음
+            page_list_df["page"] = list(range(1, num_pages + 1))
+            page_list_df.to_csv(page_list_csv_path, index=False)
         
         # item_id 크롤링
         """
@@ -512,7 +513,7 @@ class NaverCrawler:
 
         # 기존 csv 파일에서 중복 매물 id 제거
         property_id_df = pd.read_csv(item_id_csv_path)
-        property_id_df = property_id_df[property_id_df["item_id"].isin(neighbor_areas_property_ids)]
+        property_id_df = property_id_df[~property_id_df["item_id"].isin(neighbor_areas_property_ids)]
         property_id_df.to_csv(item_id_csv_path, index=False)
 
     def get_neighbor_areas_property_ids(self, property_list_dir, i, j, area_name):
