@@ -26,16 +26,16 @@ if __name__ == "__main__":
         lon = coordinates.loc[i, 'longitude']
 
         # 매물 id 크롤링
-        crawler.crawl_item_ids(data_dir, area_id, lat, lon, view)
+        # crawler.crawl_item_ids(data_dir, area_id, lat, lon, view)
 
-        # 중복 매물 id 제거
-        crawler.check_duplicate_property(
-            item_id_csv_path=os.path.join(data_dir, "id_list", area_id + ".csv"),
-            lat_idx=lat_idx,
-            lon_idx=lon_idx,
-            property_list_dir=os.path.join(data_dir, "property_list"),
-            area_name=area_name
-        )
+        # # 중복 매물 id 제거
+        # crawler.check_duplicate_property(
+        #     item_id_csv_path=os.path.join(data_dir, "id_list", area_id + ".csv"),
+        #     lat_idx=lat_idx,
+        #     lon_idx=lon_idx,
+        #     property_list_dir=os.path.join(data_dir, "property_list"),
+        #     area_name=area_name
+        # )
 
         # 매물 상세 정보 크롤링
         crawler.crawl_property_datail(data_dir, area_id)

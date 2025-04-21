@@ -1,6 +1,13 @@
 # Created by https://www.toptal.com/developers/gitignore/api/windows,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=windows,python
-crawled_data
+
+# 무시
+crawled_data/**
+
+# 예외
+!crawled_data/naver_seoul_v1/
+!crawled_data/naver_seoul_v1/coordinates.csv
+
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

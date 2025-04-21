@@ -113,7 +113,7 @@ class NaverCrawler:
     url 예시:
         https://m.land.naver.com/cluster/ajax/articleList?itemId=&mapKey=&lgeo=&showR0=&
         rletTpCd=APT:OPST:VL:YR:DSD:ABYG:OBYG:JGC:JWJT:DDDGG:SGJT:HOJT:JGB:OR:GSW:SG:SMS:GJCG:GM:TJ:APTHGJ& <- 매물 종류 코드 설정
-        tradTpCd=A1:B1:B2:B3&
+        tradTpCd=A1:B1:B2:B3& <- 매매, 전세, 월세, 단기임대 코드 설정
         z=14& <- 화면 view 사이즈
         lat=37.5882&lon=127.0464&btm=37.5623844&lft=126.9731435&top=37.6140067&rgt=127.1196565& <- 현재 조회 구역의 위도 경도 설정
         totCnt=83046& <- 전체 매물 수를 20으로 나누면 페이지 개수를 알 수 있음
