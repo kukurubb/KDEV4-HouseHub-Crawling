@@ -5,9 +5,7 @@ import os
 
 if __name__ == "__main__":
     proxy_manager = ProxyManager(
-        proxy_id="SuperVIPZHGIELE",
-        proxy_pw="TMO3VCr1",
-        proxy_txt_path="./config_data/proxy_http_ip.txt",
+        proxy_csv_path="./config_data/proxy.csv",
         block_cnt=5,
         item_id_txt_path="./config_data/item_ids.csv",
         max_retry_cnt=3,
@@ -27,7 +25,7 @@ if __name__ == "__main__":
     csv_path = r"D:\Kernel360_final_project\crawling\crawled_data\naver_seoul_v1\coordinates.csv"
     data_dir = r"D:\Kernel360_final_project\crawling\crawled_data\naver_seoul_v1"
     
-    view = 14
+    view = 16
     coordinates = pd.read_csv(csv_path)
 
     for i in range(len(coordinates)):

@@ -9,14 +9,13 @@ import time as t
 import random
 import json
 import zipfile
-
+import sys
+import os
 
 class ProxyManager:
     def __init__(
             self,
-            proxy_id,
-            proxy_pw,
-            proxy_txt_path,
+            proxy_csv_path,
             block_cnt,
             item_id_txt_path,
             max_retry_cnt=3,
@@ -25,18 +24,17 @@ class ProxyManager:
             min_time=2,
             max_time=8,
         ):
-        self.proxy_id = proxy_id
-        self.proxy_pw = proxy_pw
-        self.proxy_txt_path = proxy_txt_path
+        self.proxy_csv_path = proxy_csv_path
         self.block_cnt = block_cnt
         self.min_time = min_time
         self.max_time = max_time
 
-        self.proxy_list = self.read_proxy_list(proxy_txt_path) # ip:port의 형식
-        self.session_pool = self.create_session_pool(proxy_id, proxy_pw, self.proxy_list)
+        self.proxy_df = self.read_proxy_df(proxy_csv_path)
+        self.session_pool = self.create_session_pool(self.proxy_df)
         self.proxy_status = self.initialize_proxy_status(self.session_pool, min_time, max_time)
         self.item_ids = self.read_item_ids(item_id_txt_path)
         self.header_pool = self.create_header_pool(
+            proxy_df=self.proxy_df,
             item_ids=self.item_ids,
             max_retry_cnt=max_retry_cnt,
             curl_format=curl_format,
@@ -49,33 +47,37 @@ class ProxyManager:
         random.shuffle(item_ids)
 
         return item_ids
-
-    def read_proxy_list(self, proxy_txt_path):
-        with open(proxy_txt_path, "r") as f:
-            proxy_list = [line.strip() for line in f.readlines()]
-
-        return proxy_list
     
-    def get_proxy_address(self, proxy_id, proxy_pw, proxy):
+    def read_proxy_df(self, proxy_csv_path):
+        proxy_df = pd.read_csv(proxy_csv_path)
+
+        return proxy_df
+    
+    def get_proxy_address(self, proxy_id, proxy_pw, host, port):
         """
         proxy_id (str): 프록시 서비스 제공업체에서 발급받은 사용자 ID (예: "SuperVIPZHGIELE")
         proxy_pw (str): 프록시 서비스 제공업체에서 발급받은 사용자 비밀번호 (예: "TMO3VCr1")
         proxy (str): 프록시 서버의 IP 주소와 포트 (예: "193.187.95.173:8085")
         """
-        proxy_address = f"http://{proxy_id}:{proxy_pw}@{proxy}"
+        proxy_address = f"http://{proxy_id}:{proxy_pw}@{host}:{port}"
         return {
             "http": proxy_address,
             "https": proxy_address
         }
     
-    def create_session_pool(self, proxy_id, proxy_pw, proxy_list):
+    def create_session_pool(self, proxy_df):
         # session pool 생성
         session_pool = []
-        for idx, proxy in enumerate(proxy_list):
-            proxy_address = self.get_proxy_address(proxy_id, proxy_pw, proxy)
+        for idx in range(len(proxy_df)):
+            proxy_id = proxy_df.loc[idx, "login"]
+            proxy_pw = proxy_df.loc[idx, "password"]
+            host = proxy_df.loc[idx, "host"]
+            port = proxy_df.loc[idx, "port"]
+
+            proxy_address = self.get_proxy_address(proxy_id, proxy_pw, host, port)
             session = requests.Session()
             session.proxies.update(proxy_address) # session에 proxy 주소 업데이트
-            session_pool[idx] = session
+            session_pool.append(session)
 
         return session_pool
     
@@ -106,26 +108,29 @@ class ProxyManager:
     
     def create_header_pool(
             self,
+            proxy_df,
             item_ids,
             max_retry_cnt=3,
             curl_format="https://new.land.naver.com/houses?articleNo={}",
             plugin_file_path="./proxy_auth_plugin.zip"
         ):
-        print(50*"*" + "header pool 생성 시작" + 50*"*")
+        print(30*"*" + "header pool 생성 시작" + 30*"*")
 
+        header_pool = []
         for idx in range(len(self.session_pool)):
             # 프록시 선택
             session_idx = self.proxy_status.loc[idx, "session_idx"]
 
-            # proxy ip 선택
-            proxy = self.proxy_list[idx]
-            proxy_ip = proxy.split(":")[0]
-            port_port = proxy.split(":")[1]
+            # proxy 정보 선택
+            proxy_id = proxy_df.loc[session_idx, "login"]
+            proxy_pw = proxy_df.loc[session_idx, "password"]
+            proxy_ip = proxy_df.loc[session_idx, "host"]
+            port_port = proxy_df.loc[session_idx, "port"]
 
             # 셀레니움 드라이버 생성
             service = Service(ChromeDriverManager().install())
             options = self.set_options(headless=True)
-            self.authenticate_proxy(self.proxy_id, self.proxy_pw, proxy_ip, port_port, plugin_file_path) # 프록시 인증 파일 생성
+            self.authenticate_proxy(proxy_id, proxy_pw, proxy_ip, port_port, plugin_file_path) # 프록시 인증 파일 생성
             options.add_extension(plugin_file_path) # 프록시 인증 정보 추가
             driver = webdriver.Chrome(service=service, options=options)
 
@@ -133,8 +138,6 @@ class ProxyManager:
             item_id = item_ids.pop(0) # item_ids의 개수는 ip의 개수보다 넉넉하게 설정할 것
             driver.get(curl_format.format(item_id))
             header = self.extract_curl_from_log(driver) # 추출 실패 시 None 반환
-            
-            self.random_time_sleep(min_time=0.3, max_time=0.6)
 
             # cURL 추출 재시도
             cnt = 0
@@ -150,7 +153,7 @@ class ProxyManager:
                 cnt += 1
 
             # 헤더 정보 저장(실패한 경우 None이 추가됨)
-            self.header_pool.append(header)
+            header_pool.append(header)
 
             # 헤더 정보에 추출 실패 시 block 처리
             if header is None:
@@ -169,6 +172,8 @@ class ProxyManager:
         blocked_count = self.proxy_status['is_blocked'].sum()  # True인 개수
         available_count = len(self.proxy_status) - blocked_count  # False인 개수
         print(f"[{available_count}/{len(self.proxy_status)}] 프록시 사용 가능")
+
+        return header_pool
 
     def extract_curl_from_log(self, driver):
         logs = driver.get_log("performance")  # 성능 로그 수집
@@ -213,6 +218,14 @@ class ProxyManager:
             columns=columns,
             data=[]
         )
+        df = df.astype({
+            "session_idx": "int64",
+            "is_blocked": "bool",
+            "last_checked_time": "float64",
+            "reserved_time": "float64",
+            "last_delay_time": "float64",
+            "consecutive_error_count": "int64"
+        })
 
         for idx in range(len(session_pool)):
             session_idx = idx
@@ -232,7 +245,7 @@ class ProxyManager:
             ]
 
         # reserved_time 기준으로 오름차순 정렬
-        proxy_status = df.sort_values(by='reserved_time', ascending=True)
+        proxy_status = df.sort_values(by='reserved_time', ascending=True, ignore_index=True)
 
         return proxy_status
 
@@ -255,7 +268,7 @@ class ProxyManager:
 
         if status == "success":
             # 차단 카운트 초기화
-            df["consecutive_error_count"] = 0
+            df.loc[0, "consecutive_error_count"] = 0
             
         elif status == "fail" or status == "error":
             """
@@ -265,27 +278,27 @@ class ProxyManager:
             """
             
             # 차단 카운트 증가 및 차단 여부 확인
-            df["consecutive_error_count"] += 1
-            if df["consecutive_error_count"] >= self.block_cnt:
-                df["is_blocked"] = True
+            df.loc[0, "consecutive_error_count"] += 1
+            if df.loc[0, "consecutive_error_count"] >= self.block_cnt:
+                df.loc[0, "is_blocked"] = True
 
         # 이전 크롤링 수행 시간(현재 시간)
-        df["last_checked_time"] = t.time()
+        df.loc[0, "last_checked_time"] = t.time()
         
         # 딜레이 시간 설정(이전 딜레이 시간과 유사하면 재수행)
-        delay_time = self.random_time_sleep(self.min_time, self.max_time)
-        while abs(df["last_delay_time"] - delay_time) < 0.5:
-            delay_time = self.random_time_sleep(self.min_time, self.max_time)
-        df["last_delay_time"] = delay_time
+        delay_time = round(random.uniform(self.min_time, self.max_time), 2)
+        while abs(df.loc[0, "last_delay_time"] - delay_time) < 0.5:
+            delay_time = round(random.uniform(self.min_time, self.max_time), 2)
+        df.loc[0, "last_delay_time"] = delay_time
 
         # 다음 크롤링 수행 예정 시간(현재 시점 + 딜레이 시간)
-        df["reserved_time"] = t.time() + df["last_delay_time"]
+        df.loc[0, "reserved_time"] = t.time() + df.loc[0, "last_delay_time"]
 
         # df 업데이트
         self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx] = df
 
         # reserved_time 기준으로 오름차순 정렬
-        self.proxy_status.sort_values(by='reserved_time', ascending=True, inplace=True)
+        self.proxy_status.sort_values(by='reserved_time', ascending=True, inplace=True, ignore_index=True)
 
     def get_session_idx(self):
         current_time = t.time()
@@ -301,11 +314,12 @@ class ProxyManager:
     
     def check_blocked_proxy(self):
         # 성공률 표시 추가
-        blocked_count = self.proxy_status['is_blocked'].sum()  # True인 개수
-        available_count = len(self.proxy_status) - blocked_count  # False인 개수
+        blocked_count = self.proxy_status['is_blocked'].sum() # True인 개수
+        available_count = len(self.proxy_status) - blocked_count # False인 개수
     
         print(150*"*")
         print("")
+        print(self.proxy_status)
         print(f"[{available_count}/{len(self.proxy_status)}] 프록시 사용 가능")
         print("")
         print(150*"*")

@@ -364,6 +364,7 @@ class NaverCrawler:
                 session = self.proxy_manager.session_pool[session_idx]
 
                 try:
+                    print("request 시작")
                     # item_id 데이터 수신
                     _url = item_ids_url.format(i)
                     response = session.get(_url, headers=headers)
@@ -447,12 +448,6 @@ class NaverCrawler:
             # 세션 종료
             session.close()
 
-
-    """
-    여기도 프록시 모드 추가
-    기본 모드 세션 여닫기 추가
-    curl을 매번 추출해야하는지 확인
-    """
     def crawl_property_datail(self, data_dir, area_id):
         """
         crawled_data/
@@ -494,6 +489,10 @@ class NaverCrawler:
             for item_id in item_ids:
                 progress_cnt += 1
 
+                # 사용 가능 프록시 개수 확인
+                if progress_cnt % 100 == 0:
+                    self.proxy_manager.check_blocked_proxy()
+
                 try:
                     # 다음 대기 시간이 제일 빠른 세션 선택
                     session_idx = self.proxy_manager.get_session_idx()
@@ -528,8 +527,6 @@ class NaverCrawler:
                     self.proxy_manager.update_proxy_status(session_idx, "error")
                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
 
-            
-        
         # 기본 모드
         else:
             pass
