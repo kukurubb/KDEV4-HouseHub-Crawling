@@ -4,13 +4,15 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 import requests
-import pandas as pd
 import time as t
 import random
 import json
 import zipfile
-import sys
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+import threading
+import pandas as pd
+pd.set_option('display.float_format', '{:.0f}'.format)
 
 class ProxyManager:
     def __init__(
@@ -18,9 +20,10 @@ class ProxyManager:
             proxy_csv_path,
             block_cnt,
             item_id_txt_path,
+            max_threads=5,
             max_retry_cnt=3,
             curl_format="https://new.land.naver.com/houses?articleNo={}",
-            plugin_file_path="./config_data/proxy_auth_plugin.zip",
+            plugin_file_path_format="./config_data/{}idx_proxy_auth_plugin.zip",
             min_time=2,
             max_time=8,
         ):
@@ -29,6 +32,9 @@ class ProxyManager:
         self.min_time = min_time
         self.max_time = max_time
 
+        # 크롬 드라이버 자동 설치가 갑자기 동작안하는 경우가 있음. 그럴 경우 수동 설치로 진행
+        # self.service = Service(ChromeDriverManager().install())
+        self.service = Service(r"D:\Kernel360_final_project\crawling\config_data\chromedriver.exe")
         self.proxy_df = self.read_proxy_df(proxy_csv_path)
         self.session_pool = self.create_session_pool(self.proxy_df)
         self.proxy_status = self.initialize_proxy_status(self.session_pool, min_time, max_time)
@@ -36,9 +42,10 @@ class ProxyManager:
         self.header_pool = self.create_header_pool(
             proxy_df=self.proxy_df,
             item_ids=self.item_ids,
+            max_threads=max_threads,
             max_retry_cnt=max_retry_cnt,
             curl_format=curl_format,
-            plugin_file_path=plugin_file_path
+            plugin_file_path_format=plugin_file_path_format
         )
 
     def read_item_ids(self, item_id_txt_path):
@@ -106,71 +113,95 @@ class ProxyManager:
 
         return options
     
+    def get_header_with_proxy(
+            self,
+            idx,
+            proxy_df,
+            item_queue,
+            curl_format,
+            max_retry_cnt,
+            plugin_file_path,
+            lock
+        ):
+        # 프록시 선택
+        session_idx = self.proxy_status.loc[idx, "session_idx"]
+
+        # proxy 정보 선택
+        proxy_id = proxy_df.loc[session_idx, "login"]
+        proxy_pw = proxy_df.loc[session_idx, "password"]
+        proxy_ip = proxy_df.loc[session_idx, "host"]
+        port_port = proxy_df.loc[session_idx, "port"]
+
+        # 셀레니움 드라이버 생성
+        options = self.set_options(headless=True)
+        self.authenticate_proxy(proxy_id, proxy_pw, proxy_ip, port_port, plugin_file_path) # 프록시 인증 파일 생성
+        options.add_extension(plugin_file_path) # 프록시 인증 정보 추가
+        # service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=self.service, options=options)
+
+        header = None
+        try:
+            # cURL 추출 후 cURL 내부의 헤더 정보 저장
+            for _ in range(max_retry_cnt):
+                item_id = item_queue.get()
+                driver.get(curl_format.format(item_id))
+                header = self.extract_curl_from_log(driver) # 추출 실패 시 None 반환
+
+                if header:
+                    break
+                self.random_time_sleep(self.min_time, self.max_time) # 실패한 경우에만 딜레이 추가(같은 ip로 재시도하기 때문)
+
+            # 헤더 정보에 추출 실패 시 block 처리
+            if not header:
+                with lock:
+                    self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx, "is_blocked"] = True
+
+            return idx, header
+        
+        finally:
+            driver.quit() # 드라이버 종료
+
     def create_header_pool(
             self,
             proxy_df,
             item_ids,
-            max_retry_cnt=3,
-            curl_format="https://new.land.naver.com/houses?articleNo={}",
-            plugin_file_path="./proxy_auth_plugin.zip"
+            max_threads,
+            max_retry_cnt,
+            curl_format,
+            plugin_file_path_format
         ):
         print(30*"*" + "header pool 생성 시작" + 30*"*")
 
-        header_pool = []
-        for idx in range(len(self.session_pool)):
-            # 프록시 선택
-            session_idx = self.proxy_status.loc[idx, "session_idx"]
-
-            # proxy 정보 선택
-            proxy_id = proxy_df.loc[session_idx, "login"]
-            proxy_pw = proxy_df.loc[session_idx, "password"]
-            proxy_ip = proxy_df.loc[session_idx, "host"]
-            port_port = proxy_df.loc[session_idx, "port"]
-
-            # 셀레니움 드라이버 생성
-            service = Service(ChromeDriverManager().install())
-            options = self.set_options(headless=True)
-            self.authenticate_proxy(proxy_id, proxy_pw, proxy_ip, port_port, plugin_file_path) # 프록시 인증 파일 생성
-            options.add_extension(plugin_file_path) # 프록시 인증 정보 추가
-            driver = webdriver.Chrome(service=service, options=options)
-
-            # cURL 추출 후 cURL 내부의 헤더 정보 저장
-            item_id = item_ids.pop(0) # item_ids의 개수는 ip의 개수보다 넉넉하게 설정할 것
-            driver.get(curl_format.format(item_id))
-            header = self.extract_curl_from_log(driver) # 추출 실패 시 None 반환
-
-            # cURL 추출 재시도
-            cnt = 0
-            while not header:
-                # 최대 재시도 횟수 초과 시 종료
-                if cnt >= max_retry_cnt:
-                    break
-                self.random_time_sleep(self.min_time, self.max_time) # 실패한 경우에만 딜레이 추가(같은 ip로 재시도하기 때문)
-                
-                item_id = item_ids.pop(0)
-                driver.get(curl_format.format(item_id))
-                header = self.extract_curl_from_log(driver)
-                cnt += 1
-
-            # 헤더 정보 저장(실패한 경우 None이 추가됨)
-            header_pool.append(header)
-
-            # 헤더 정보에 추출 실패 시 block 처리
-            if header is None:
-                self.proxy_status[self.proxy_status["session_idx"] == session_idx, "is_blocked"] = True
+        # 멀티 쓰레드를 위한 인덱스화 된 header_pool 변수 생성 및 큐 생성
+        header_pool = [None] * len(self.session_pool)
+        item_queue = Queue()
+        for item_id in item_ids:
+            item_queue.put(item_id)
             
-            # 헤더 추출 성공 여부 출력
-            if header:
-                print(f"[{idx+1:04}/{len(self.session_pool):04}] 헤더 추출 완료")
-            else:
-                print(f"[{idx+1:04}/{len(self.session_pool):04}] 헤더 추출 실패")
+        lock = threading.Lock() # 동시 쓰기 방지용
 
-            # 드라이버 종료
-            driver.quit()
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [
+                executor.submit(
+                    self.get_header_with_proxy,
+                    idx, proxy_df, item_queue,
+                    curl_format, max_retry_cnt,
+                    plugin_file_path_format.format(idx),
+                    lock
+                )
+                for idx in range(len(self.session_pool))
+            ]
 
-        # 성공률 표시 추가
-        blocked_count = self.proxy_status['is_blocked'].sum()  # True인 개수
-        available_count = len(self.proxy_status) - blocked_count  # False인 개수
+            for future in as_completed(futures):
+                idx, header = future.result()
+                header_pool[idx] = header
+                if header:
+                    print(f"[{idx+1:04}/{len(self.session_pool):04}] 헤더 추출 완료")
+                else:
+                    print(f"[{idx+1:04}/{len(self.session_pool):04}] 헤더 추출 실패")
+
+        blocked_count = self.proxy_status["is_blocked"].sum()
+        available_count = len(self.proxy_status) - blocked_count
         print(f"[{available_count}/{len(self.proxy_status)}] 프록시 사용 가능")
 
         return header_pool

@@ -29,6 +29,9 @@ class NaverCrawler:
         self.min_time = min_time
         self.max_time = max_time
         self.proxy_manager = proxy_manager
+        # 크롬 드라이버 자동 설치가 갑자기 동작안하는 경우가 있음. 그럴 경우 수동 설치로 진행
+        # self.service = Service(ChromeDriverManager().install())
+        self.service = Service(r"D:\Kernel360_final_project\crawling\config_data\chromedriver.exe")
 
     def set_options(self, headless=False):
         # Chrome 옵션 설정
@@ -285,7 +288,7 @@ class NaverCrawler:
         progress_cnt = len(id_list_df[id_list_df["status"] == "success"]) # 이미 수집한 매물 개수
         return num_item_ids, progress_cnt
 
-    def crawl_item_ids(self, data_dir, area_id, lat, lon, view):
+    def crawl_item_ids(self, data_dir, area_id, lat, lon, view, print_log_cnt=50):
         """
         crawled_data/
         │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
@@ -326,8 +329,8 @@ class NaverCrawler:
         options = self.set_options(headless=False)
 
         # 크롬 드라이버 설치 및 실행
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=self.service, options=options)
         wait = WebDriverWait(driver, 20)
 
         self.get_url(driver, lat, lon, view) # URL 접속
@@ -351,7 +354,7 @@ class NaverCrawler:
                 progress_cnt += 1
 
                 # 사용 가능 프록시 개수 확인
-                if progress_cnt % 100 == 0:
+                if progress_cnt % print_log_cnt == 0:
                     self.proxy_manager.check_blocked_proxy()
 
                 # status가 success가 아닌 데이터에 대해 크롤링 진행
@@ -448,7 +451,7 @@ class NaverCrawler:
             # 세션 종료
             session.close()
 
-    def crawl_property_datail(self, data_dir, area_id):
+    def crawl_property_datail(self, data_dir, area_id, print_log_cnt=50):
         """
         crawled_data/
         │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
@@ -473,13 +476,8 @@ class NaverCrawler:
         property_list_dir = os.path.join(data_dir, "property_list", f"{area_id}")
         self.make_dir(property_list_dir)
 
-        # 옵션 설정
-        headers = self.set_headers()
-        options = self.set_options(headless=True)
-
         # URL 설정 / 네이버 부동산은 모든 매물에 대해 통일된 주소를 사용
         property_detail_url = "https://new.land.naver.com/api/articles/{}"
-        curl_format = "https://new.land.naver.com/houses?articleNo={}"
 
         item_ids = self.get_item_ids(id_list_csv_path) # 매물 item_id 리스트 로딩
         num_item_ids, progress_cnt = self.get_progress_infos(id_list_csv_path) # 진행도 체크용 변수
@@ -490,7 +488,7 @@ class NaverCrawler:
                 progress_cnt += 1
 
                 # 사용 가능 프록시 개수 확인
-                if progress_cnt % 100 == 0:
+                if progress_cnt % print_log_cnt == 0:
                     self.proxy_manager.check_blocked_proxy()
 
                 try:
@@ -529,61 +527,62 @@ class NaverCrawler:
 
         # 기본 모드
         else:
-            pass
+            # 옵션 설정
+            headers = self.set_headers()
+            options = self.set_options(headless=True)
 
+            # cURL 설정
+            curl_format = "https://new.land.naver.com/houses?articleNo={}"
+
+            # 크롬 브라우저 자동 실행
+            # service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=self.service, options=options)
+
+            # 매물 정보 크롤링
+            for item_id in item_ids:
+                progress_cnt += 1
+
+                try:
+                    driver.get(curl_format.format(item_id))
+                    self.random_time_sleep(self.min_time, self.max_time)
+
+                    # cURL 추출
+                    c_headers = self.extract_curl_from_log(driver)
+                    if c_headers == None:
+                        # cURL 추출 실패 status 기록
+                        self.update_status(
+                            status="error",
+                            column_name="item_id",
+                            value=item_id, # 매물 고유 아이디
+                            csv_path=id_list_csv_path,
+                        )
+                        print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} cURL 정보 수신 실패")
+                        continue
+                    
+                    # 데이터 수신
+                    _property_detail_url = property_detail_url.format(item_id)
+                    response = requests.get(
+                        _property_detail_url,
+                        params={"complexNo": ""},
+                        headers=c_headers
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        self.save_property_datail(data, item_id, property_list_dir)
+                        # 성공 status 기록
+                        self.update_status("success", "item_id", item_id, id_list_csv_path)
+                        print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
+                    
+                    else:
+                        # 실패 status 기록
+                        self.update_status("success", "item_id", item_id, id_list_csv_path)
+                        print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
             
-
-        #     # 크롬 브라우저 자동 실행
-        #     service = Service(ChromeDriverManager().install())
-        #     driver = webdriver.Chrome(service=service, options=options)
-        #     wait = WebDriverWait(driver, 10)
-        #     pass
-
-        # # 매물 정보 크롤링
-        # for item_id in item_ids:
-        #     progress_cnt += 1
-
-        #     try:
-        #         driver.get(curl.format(item_id))
-        #         self.random_time_sleep(self.min_time, self.max_time)
-
-        #         # cURL 추출
-        #         c_headers = self.extract_curl_from_log(driver)
-        #         if c_headers == None:
-        #             # cURL 추출 실패 status 기록
-        #             self.update_status(
-        #                 status="error",
-        #                 column_name="item_id",
-        #                 value=item_id, # 매물 고유 아이디
-        #                 csv_path=id_list_csv_path,
-        #             )
-        #             print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} cURL 정보 수신 실패")
-        #             continue
-                
-        #         # 데이터 수신
-        #         _property_detail_url = property_detail_url.format(item_id)
-        #         response = requests.get(
-        #             _property_detail_url,
-        #             params={"complexNo": ""},
-        #             headers=c_headers
-        #         )
-                
-        #         if response.status_code == 200:
-        #             data = response.json()
-        #             self.save_property_datail(data, item_id, property_list_dir)
-        #             # 성공 status 기록
-        #             self.update_status("success", "item_id", item_id, id_list_csv_path)
-        #             print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
-                
-        #         else:
-        #             # 실패 status 기록
-        #             self.update_status("success", "item_id", item_id, id_list_csv_path)
-        #             print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
-        
-        #     except Exception as e:
-        #         # 네트워크 중단 status 기록
-        #         self.update_status("error", "item_id", item_id, id_list_csv_path)
-        #         print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
+                except Exception as e:
+                    # 네트워크 중단 status 기록
+                    self.update_status("error", "item_id", item_id, id_list_csv_path)
+                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
 
     """
     인접 좌표에 해당하는 매물 id 추출 후

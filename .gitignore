@@ -4,6 +4,7 @@
 # 무시
 crawled_data/**
 config_data/**
+dummy_code
 
 # 예외
 !crawled_data/naver_seoul_v1/
