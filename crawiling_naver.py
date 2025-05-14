@@ -17,6 +17,9 @@ import random
 import os
 import pandas as pd
 from glob import glob
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from queue import Queue
 
 
 class NaverCrawler:
@@ -24,14 +27,19 @@ class NaverCrawler:
         self,
         min_time=2,
         max_time=8,
+        print_log_cnt=50,
         proxy_manager=None
     ):
         self.min_time = min_time
         self.max_time = max_time
+        self.print_log_cnt = print_log_cnt
         self.proxy_manager = proxy_manager
         # 크롬 드라이버 자동 설치가 갑자기 동작안하는 경우가 있음. 그럴 경우 수동 설치로 진행
         # self.service = Service(ChromeDriverManager().install())
         self.service = Service(r"D:\Kernel360_final_project\crawling\config_data\chromedriver.exe")
+
+        self.lock = threading.Lock() # 동시성 제어용 락
+        self.progress_cnt = 0
 
     def set_options(self, headless=False):
         # Chrome 옵션 설정
@@ -40,14 +48,14 @@ class NaverCrawler:
         # 사용자 환경과 유사하게 브라우저 옵션 설정
         options.add_argument("--start-maximized")
         options.add_argument('--headless') if headless else None # 화면 비활성화
-        options.add_argument('--disable-gpu')  # GPU 가속 비활성화 (Windows에서 필수일 수 있음)
-        options.add_argument("--disable-infobars")  # 정보 표시창 제거 (자동화 감지 메시지 방지)
-        options.add_argument("--disable-blink-features=AutomationControlled")  # 자동화 감지 기능 비활성화
+        options.add_argument('--disable-gpu') # GPU 가속 비활성화 (Windows에서 필수일 수 있음)
+        options.add_argument("--disable-infobars") # 정보 표시창 제거 (자동화 감지 메시지 방지)
+        options.add_argument("--disable-blink-features=AutomationControlled") # 자동화 감지 기능 비활성화
         options.set_capability("goog:loggingPrefs", {"performance": "ALL"}) # DevTools 로그 수집을 위한 설정 / XHR 추적용도
 
         # 탐지 우회: Chrome 내부 플래그 설정 변경
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 자동화 플래그 제거
-        options.add_experimental_option("useAutomationExtension", False)  # 셀레니움 확장 비활성화
+        options.add_experimental_option("excludeSwitches", ["enable-automation"]) # 자동화 플래그 제거
+        options.add_experimental_option("useAutomationExtension", False) # 셀레니움 확장 비활성화
 
         # User-Agent 변경
         options.add_argument(
@@ -64,13 +72,13 @@ class NaverCrawler:
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/120.0.0.0 Safari/537.36",
 
-            "Referer": "https://m.land.naver.com/",  # 네이버 내부 요청처럼 위장
+            "Referer": "https://m.land.naver.com/", # 네이버 내부 요청처럼 위장
 
-            "X-Requested-With": "XMLHttpRequest",    # AJAX 요청처럼 보이게
+            "X-Requested-With": "XMLHttpRequest", # AJAX 요청처럼 보이게
 
-            "Accept": "application/json, text/javascript, */*; q=0.01",  # JSON 응답 허용
+            "Accept": "application/json, text/javascript, */*; q=0.01", # JSON 응답 허용
 
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"     # 한국어 브라우저 설정 흉내
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7" # 한국어 브라우저 설정 흉내
         }
         return headers
     
@@ -176,6 +184,7 @@ class NaverCrawler:
         page_list_df = pd.read_csv(page_list_csv_path)
         if len(page_list_df) == 0:
             page_list_df["page"] = list(range(1, num_pages + 1))
+            page_list_df["status"] = ["pending"] * num_pages
             page_list_df.to_csv(page_list_csv_path, index=False)
     
     def make_dir(self, folder_path):
@@ -287,8 +296,82 @@ class NaverCrawler:
         num_item_ids = len(id_list_df) # 전체 매물 개수
         progress_cnt = len(id_list_df[id_list_df["status"] == "success"]) # 이미 수집한 매물 개수
         return num_item_ids, progress_cnt
+    
+    def get_progress_cnt(self):
+        return self.progress_cnt
 
-    def crawl_item_ids(self, data_dir, area_id, lat, lon, view, print_log_cnt=50):
+    def increase_progress_cnt(self):
+        self.progress_cnt += 1
+
+    def crawl_item_id(
+            self,
+            session_idx,
+            session,
+            page_url_format,
+            page_idx,
+            headers,
+            num_pages,
+            id_list_csv_path,
+            page_list_csv_path
+        ):
+        try:
+            # item_id 데이터 수신
+            _url = page_url_format.format(page_idx)
+            response = session.get(_url, headers=headers)
+
+            # 데이터 수신 과정
+            if response.status_code == 200:
+                data = response.json()
+                articles = data.get("body", [])
+
+                # item_ids 추출
+                item_ids = []
+                for article in articles:
+                    if "atclNo" in article:
+                        item_ids.append(article["atclNo"])
+
+                with self.lock:
+                    # item_ids 기록
+                    self.write_id_list(item_ids, id_list_csv_path)
+                    # 성공 status 기록
+                    self.update_status("success", "page", page_idx, page_list_csv_path)
+                    self.proxy_manager.update_proxy_status(session_idx, "success")
+                    # 로그 출력
+                    self.increase_progress_cnt()
+                    progress_cnt = self.get_progress_cnt()
+                    print(f"[{progress_cnt:04}/{num_pages:04}] {page_idx:04} 페이지 item id 수신 완료 / url: {_url}")
+                    # 사용 가능 프록시 개수 확인
+                    if self.progress_cnt % self.print_log_cnt == 0:
+                        self.proxy_manager.check_blocked_proxy()
+
+            else:
+                with self.lock:
+                    # 실패 status 기록
+                    self.update_status("fail", "page", page_idx, page_list_csv_path)
+                    self.proxy_manager.update_proxy_status(session_idx, "fail")
+                    # 로그 출력
+                    self.increase_progress_cnt()
+                    progress_cnt = self.get_progress_cnt()
+                    print(f"[{progress_cnt:04}/{num_pages:04}] {page_idx:04} 페이지 item id 수신 실패 / 상태 코드: {response.status_code}")
+                    # 사용 가능 프록시 개수 확인
+                    if self.progress_cnt % self.print_log_cnt == 0:
+                        self.proxy_manager.check_blocked_proxy()
+                
+        except Exception as e:
+            with self.lock:
+                # 네트워크 중단 status 기록
+                self.update_status("error", "page", page_idx, page_list_csv_path)
+                self.proxy_manager.update_proxy_status(session_idx, "error")
+                # 로그 출력
+                self.increase_progress_cnt()
+                progress_cnt = self.get_progress_cnt()
+                print(f"[{progress_cnt:04}/{num_pages:04}] {page_idx:04} 페이지 요청 중 에러 발생 → {e}")
+                # 사용 가능 프록시 개수 확인
+                if self.progress_cnt % self.print_log_cnt == 0:
+                    self.proxy_manager.check_blocked_proxy()
+    
+    # 멀티 쓰레드
+    def crawl_item_ids(self, data_dir, area_id, lat, lon, view, max_threads=3):
         """
         crawled_data/
         │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
@@ -337,8 +420,8 @@ class NaverCrawler:
         self.open_sidebar(driver, wait) # 사이드바 열기
         self.scroll_down_sidebar(driver, wait, num_scroll_down=3) # 사이드바 스크롤 다운 n회 수행
         
-        item_ids_url = self.get_xhr_url(driver) # XHR 주소 수집
-        num_pages = self.get_num_pages(item_ids_url) # XHR 주소로 접근하여 전체 페이지 수 계산
+        page_url_format = self.get_xhr_url(driver) # XHR 주소 수집
+        num_pages = self.get_num_pages(page_url_format) # XHR 주소로 접근하여 전체 페이지 수 계산
         self.write_num_pages(num_pages, page_list_csv_path) # 페이지 번호 df에 기록
         page_list_df = pd.read_csv(page_list_csv_path) # 페이지 번호 df 선언
 
@@ -346,63 +429,34 @@ class NaverCrawler:
 
         # item_id 크롤링 과정
         page_indices = self.get_random_page_indices(num_pages)
-        progress_cnt = (page_list_df["status"] == "success").sum() # 이전 작업에서 success 한 페이지 개수
+        self.progress_cnt = (page_list_df["status"] == "success").sum() # 이전 작업에서 success 한 페이지 개수
 
         # 프록시 모드
         if self.proxy_manager:
-            for i in page_indices:
-                progress_cnt += 1
+            with ThreadPoolExecutor(max_workers=max_threads) as executor:
+                for page_idx in page_indices:
+                    # status가 success가 아닌 데이터에 대해 크롤링 진행
+                    # page_idx가 1부터 시작하도록 설정했으므로 page_idx-1
+                    if page_list_df.loc[page_idx-1, "status"] == "success":
+                        continue
 
-                # 사용 가능 프록시 개수 확인
-                if progress_cnt % print_log_cnt == 0:
-                    self.proxy_manager.check_blocked_proxy()
+                    # 다음 대기 시간이 제일 빠른 세션 선택
+                    session_idx = self.proxy_manager.get_session_idx()
+                    session = self.proxy_manager.session_pool[session_idx]
 
-                # status가 success가 아닌 데이터에 대해 크롤링 진행
-                # i가 1부터 시작하도록 설정했으므로 i-1
-                if page_list_df.loc[i-1, "status"] == "success":
-                    continue
-
-                # 다음 대기 시간이 제일 빠른 세션 선택
-                session_idx = self.proxy_manager.get_session_idx()
-                session = self.proxy_manager.session_pool[session_idx]
-
-                try:
-                    print("request 시작")
-                    # item_id 데이터 수신
-                    _url = item_ids_url.format(i)
-                    response = session.get(_url, headers=headers)
-
-                    # 데이터 수신 과정
-                    if response.status_code == 200:
-                        data = response.json()
-                        articles = data.get("body", [])
-
-                        # item_ids 추출
-                        item_ids = []
-                        for article in articles:
-                            if "atclNo" in article:
-                                item_ids.append(article["atclNo"])
-
-                        # item_ids 기록
-                        self.write_id_list(item_ids, id_list_csv_path)
-
-                        # 성공 status 기록
-                        self.update_status("success", "page", i, page_list_csv_path)
-                        self.proxy_manager.update_proxy_status(session_idx, "success")
-                        print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 item id 수신 완료 / url: {_url}")
-
-                    else:
-                        # 실패 status 기록
-                        self.update_status("fail", "page", i, page_list_csv_path)
-                        self.proxy_manager.update_proxy_status(session_idx, "fail")
-                        print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 item id 수신 실패 / 상태 코드: {response.status_code}")
-                        
-                except Exception as e:
-                    # 네트워크 중단 status 기록
-                    self.update_status("error", "page", i, page_list_csv_path)
-                    self.proxy_manager.update_proxy_status(session_idx, "error")
-                    print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 요청 중 에러 발생 → {e}")
-
+                    # 멀티 쓰레드 크롤링
+                    executor.submit(
+                        self.crawl_item_id,
+                        session_idx,
+                        session,
+                        page_url_format,
+                        page_idx,
+                        headers,
+                        num_pages,
+                        id_list_csv_path,
+                        page_list_csv_path
+                    )
+                    
         # 기본 모드
         else:
             # 세션 생성
@@ -418,7 +472,7 @@ class NaverCrawler:
 
                 try:
                     # item_id 데이터 수신
-                    _url = item_ids_url.format(i)
+                    _url = page_url_format.format(i)
                     response = session.get(_url, headers=headers)
                     
                     if response.status_code == 200:
@@ -451,7 +505,74 @@ class NaverCrawler:
             # 세션 종료
             session.close()
 
-    def crawl_property_datail(self, data_dir, area_id, print_log_cnt=50):
+    def crawl_property_datail(
+            self,
+            session_idx,
+            session,
+            property_detail_url_format,
+            item_id,
+            num_item_ids,
+            headers,
+            id_list_csv_path,
+            property_list_dir
+        ):
+        try:
+            # 데이터 수신
+            _property_detail_url = property_detail_url_format.format(item_id)
+            response = session.get(
+                _property_detail_url,
+                params={"complexNo": ""},
+                headers=headers
+            )
+        
+            if response.status_code == 200:
+                data = response.json()
+                with self.lock:
+                    # property_detail 기록
+                    self.save_property_datail(data, item_id, property_list_dir)
+                    # 성공 status 기록
+                    self.update_status("success", "item_id", item_id, id_list_csv_path)
+                    self.proxy_manager.update_proxy_status(session_idx, "success")
+                    # 로그 출력
+                    self.increase_progress_cnt()
+                    progress_cnt = self.get_progress_cnt()
+                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
+                    # 사용 가능 프록시 개수 확인
+                    if self.progress_cnt % self.print_log_cnt == 0:
+                        self.proxy_manager.check_blocked_proxy()
+
+            else:
+                with self.lock:
+                    # 실패 status 기록
+                    self.update_status("fail", "item_id", item_id, id_list_csv_path)
+                    self.proxy_manager.update_proxy_status(session_idx, "fail")
+                    # 로그 출력
+                    self.increase_progress_cnt()
+                    progress_cnt = self.get_progress_cnt()
+                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
+                    # 사용 가능 프록시 개수 확인
+                    if self.progress_cnt % self.print_log_cnt == 0:
+                        self.proxy_manager.check_blocked_proxy()
+    
+        except Exception as e:
+            with self.lock:
+                # 네트워크 중단 status 기록
+                self.update_status("error", "item_id", item_id, id_list_csv_path)
+                self.proxy_manager.update_proxy_status(session_idx, "error")
+                # 로그 출력
+                self.increase_progress_cnt()
+                progress_cnt = self.get_progress_cnt()
+                print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
+                # 사용 가능 프록시 개수 확인
+                if self.progress_cnt % self.print_log_cnt == 0:
+                    self.proxy_manager.check_blocked_proxy()
+
+    def crawl_property_datails(
+            self,
+            data_dir,
+            area_id,
+            max_threads=3
+        ):
         """
         crawled_data/
         │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
@@ -477,53 +598,32 @@ class NaverCrawler:
         self.make_dir(property_list_dir)
 
         # URL 설정 / 네이버 부동산은 모든 매물에 대해 통일된 주소를 사용
-        property_detail_url = "https://new.land.naver.com/api/articles/{}"
+        property_detail_url_format = "https://new.land.naver.com/api/articles/{}"
 
         item_ids = self.get_item_ids(id_list_csv_path) # 매물 item_id 리스트 로딩
         num_item_ids, progress_cnt = self.get_progress_infos(id_list_csv_path) # 진행도 체크용 변수
 
         # 프록시 모드
         if self.proxy_manager:
-            for item_id in item_ids:
-                progress_cnt += 1
-
-                # 사용 가능 프록시 개수 확인
-                if progress_cnt % print_log_cnt == 0:
-                    self.proxy_manager.check_blocked_proxy()
-
-                try:
+            with ThreadPoolExecutor(max_workers=max_threads) as executor:
+                for item_id in item_ids:
                     # 다음 대기 시간이 제일 빠른 세션 선택
                     session_idx = self.proxy_manager.get_session_idx()
                     session = self.proxy_manager.session_pool[session_idx]
                     headers = self.proxy_manager.header_pool[session_idx]
 
-                    # 데이터 수신
-                    _property_detail_url = property_detail_url.format(item_id)
-                    response = session.get(
-                        _property_detail_url,
-                        params={"complexNo": ""},
-                        headers=headers
+                    # 멀티 쓰레드 크롤링
+                    executor.submit(
+                        self.crawl_property_datail,
+                        session_idx,
+                        session,
+                        property_detail_url_format,
+                        item_id,
+                        num_item_ids,
+                        headers,
+                        id_list_csv_path,
+                        property_list_dir
                     )
-                
-                    if response.status_code == 200:
-                        data = response.json()
-                        self.save_property_datail(data, item_id, property_list_dir)
-                        # 성공 status 기록
-                        self.update_status("success", "item_id", item_id, id_list_csv_path)
-                        self.proxy_manager.update_proxy_status(session_idx, "success")
-                        print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
-                    
-                    else:
-                        # 실패 status 기록
-                        self.update_status("fail", "item_id", item_id, id_list_csv_path)
-                        self.proxy_manager.update_proxy_status(session_idx, "fail")
-                        print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
-            
-                except Exception as e:
-                    # 네트워크 중단 status 기록
-                    self.update_status("error", "item_id", item_id, id_list_csv_path)
-                    self.proxy_manager.update_proxy_status(session_idx, "error")
-                    print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
 
         # 기본 모드
         else:
@@ -560,7 +660,7 @@ class NaverCrawler:
                         continue
                     
                     # 데이터 수신
-                    _property_detail_url = property_detail_url.format(item_id)
+                    _property_detail_url = property_detail_url_format.format(item_id)
                     response = requests.get(
                         _property_detail_url,
                         params={"complexNo": ""},
@@ -583,12 +683,12 @@ class NaverCrawler:
                     # 네트워크 중단 status 기록
                     self.update_status("error", "item_id", item_id, id_list_csv_path)
                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
-
-    """
-    인접 좌표에 해당하는 매물 id 추출 후
-    기존 csv 파일에서 중복 매물 id 제거
-    """
+                    
     def check_duplicate_property(self, item_id_csv_path, lat_idx, lon_idx, property_list_dir, area_name):
+        """
+        인접 좌표에 해당하는 매물 id 추출 후
+        기존 csv 파일에서 중복 매물 id 제거
+        """
         # 인접 좌표에 해당하는 매물 id 추출
         neighbor_areas_property_ids = self.get_neighbor_areas_property_ids(property_list_dir, lat_idx, lon_idx, area_name)
 
@@ -619,3 +719,299 @@ class NaverCrawler:
                     neighbor_areas_property_ids.append(ids) # 예시 2500000
 
         return neighbor_areas_property_ids
+
+    # def crawl_item_ids(self, data_dir, area_id, lat, lon, view, print_log_cnt=50):
+    #     """
+    #     crawled_data/
+    #     │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
+    #     ├── page_list/
+    #     │   ├── area1.csv
+    #     │   ├── area2.csv
+    #     │   └── area3.csv
+    #     │   # 해당 지역의 매물 item_id와 수신 성공 여부 기록
+    #     ├── id_list/
+    #     │   ├── area1.csv
+    #     │   ├── area2.csv
+    #     │   └── area3.csv
+    #     │   # 매물 상세정보 기록
+    #     └── property_list/
+    #         ├── 2500001.txt
+    #         ├── 2500002.txt
+    #         └── 2500003.txt
+    #     """
+    #     # 파일 생성
+    #     page_list_dir = os.path.join(data_dir, "page_list")
+    #     page_list_csv_path = os.path.join(page_list_dir, f"{area_id}.csv")
+    #     id_list_dir = os.path.join(data_dir, "id_list")
+    #     id_list_csv_path = os.path.join(id_list_dir, f"{area_id}.csv")
+
+    #     self.create_csv(
+    #         dir=page_list_dir,
+    #         csv_path=page_list_csv_path,
+    #         columns=["page", "status"],
+    #     )
+    #     self.create_csv(
+    #         dir=id_list_dir,
+    #         csv_path=id_list_csv_path,
+    #         columns=["item_id", "status"],
+    #     )
+
+    #     # 옵션 설정
+    #     headers = self.set_headers() # 이 헤더도 crawl_property_datail처럼 셀레니움에서 실제 헤더를 받아서 대체하는 것도 좋을 듯 함
+    #     options = self.set_options(headless=False)
+
+    #     # 크롬 드라이버 설치 및 실행
+    #     # service = Service(ChromeDriverManager().install())
+    #     driver = webdriver.Chrome(service=self.service, options=options)
+    #     wait = WebDriverWait(driver, 20)
+
+    #     self.get_url(driver, lat, lon, view) # URL 접속
+    #     self.open_sidebar(driver, wait) # 사이드바 열기
+    #     self.scroll_down_sidebar(driver, wait, num_scroll_down=3) # 사이드바 스크롤 다운 n회 수행
+        
+    #     page_url = self.get_xhr_url(driver) # XHR 주소 수집
+    #     num_pages = self.get_num_pages(page_url) # XHR 주소로 접근하여 전체 페이지 수 계산
+    #     self.write_num_pages(num_pages, page_list_csv_path) # 페이지 번호 df에 기록
+    #     page_list_df = pd.read_csv(page_list_csv_path) # 페이지 번호 df 선언
+
+    #     driver.quit() # 크롬 드라이버 종료
+
+    #     # item_id 크롤링 과정
+    #     page_indices = self.get_random_page_indices(num_pages)
+    #     progress_cnt = (page_list_df["status"] == "success").sum() # 이전 작업에서 success 한 페이지 개수
+
+    #     # 프록시 모드
+    #     if self.proxy_manager:
+    #         for i in page_indices:
+    #             progress_cnt += 1
+
+    #             # 사용 가능 프록시 개수 확인
+    #             if progress_cnt % print_log_cnt == 0:
+    #                 self.proxy_manager.check_blocked_proxy()
+
+    #             # status가 success가 아닌 데이터에 대해 크롤링 진행
+    #             # i가 1부터 시작하도록 설정했으므로 i-1
+    #             if page_list_df.loc[i-1, "status"] == "success":
+    #                 continue
+
+    #             # 다음 대기 시간이 제일 빠른 세션 선택
+    #             session_idx = self.proxy_manager.get_session_idx()
+    #             session = self.proxy_manager.session_pool[session_idx]
+
+    #             try:
+    #                 print("request 시작")
+    #                 # item_id 데이터 수신
+    #                 _url = page_url.format(i)
+    #                 response = session.get(_url, headers=headers)
+
+    #                 # 데이터 수신 과정
+    #                 if response.status_code == 200:
+    #                     data = response.json()
+    #                     articles = data.get("body", [])
+
+    #                     # item_ids 추출
+    #                     item_ids = []
+    #                     for article in articles:
+    #                         if "atclNo" in article:
+    #                             item_ids.append(article["atclNo"])
+
+    #                     # item_ids 기록
+    #                     self.write_id_list(item_ids, id_list_csv_path)
+
+    #                     # 성공 status 기록
+    #                     self.update_status("success", "page", i, page_list_csv_path)
+    #                     self.proxy_manager.update_proxy_status(session_idx, "success")
+    #                     print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 item id 수신 완료 / url: {_url}")
+
+    #                 else:
+    #                     # 실패 status 기록
+    #                     self.update_status("fail", "page", i, page_list_csv_path)
+    #                     self.proxy_manager.update_proxy_status(session_idx, "fail")
+    #                     print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 item id 수신 실패 / 상태 코드: {response.status_code}")
+                        
+    #             except Exception as e:
+    #                 # 네트워크 중단 status 기록
+    #                 self.update_status("error", "page", i, page_list_csv_path)
+    #                 self.proxy_manager.update_proxy_status(session_idx, "error")
+    #                 print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 요청 중 에러 발생 → {e}")
+
+    #     # 기본 모드
+    #     else:
+    #         # 세션 생성
+    #         session = requests.Session()
+            
+    #         for i in page_indices:
+    #             progress_cnt += 1
+
+    #             # status가 success가 아닌 데이터에 대해 크롤링 진행
+    #             # i가 1부터 시작하도록 설정했으므로 i-1
+    #             if page_list_df.loc[i-1, "status"] == "success":
+    #                 continue
+
+    #             try:
+    #                 # item_id 데이터 수신
+    #                 _url = item_ids_url.format(i)
+    #                 response = session.get(_url, headers=headers)
+                    
+    #                 if response.status_code == 200:
+    #                     data = response.json()
+    #                     articles = data.get("body", [])
+
+    #                     # item_ids 추출
+    #                     item_ids = []
+    #                     for article in articles:
+    #                         if "atclNo" in article:
+    #                             item_ids.append(article["atclNo"])
+
+    #                     # item_ids 기록
+    #                     self.write_id_list(item_ids, id_list_csv_path)
+
+    #                     # 성공 status 기록
+    #                     self.update_status("success", "page", i, page_list_csv_path)
+    #                     print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 item id 수신 완료 / url: {_url}")
+
+    #                 else:
+    #                     # 실패 status 기록
+    #                     self.update_status("fail", "page", i, page_list_csv_path)
+    #                     print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 item id 수신 실패 / 상태 코드: {response.status_code}")
+
+    #             except Exception as e:
+    #                 # 네트워크 중단 status 기록
+    #                 self.update_status("error", "page", i, page_list_csv_path)
+    #                 print(f"[{progress_cnt:04}/{num_pages:04}] {i:04} 페이지 요청 중 에러 발생 → {e}")
+            
+    #         # 세션 종료
+    #         session.close()
+
+    # def crawl_property_datail(self, data_dir, area_id, print_log_cnt=50):
+    #     """
+    #     crawled_data/
+    #     │   # 해당 지역의 매물 리스트 페이지 번호와 수신 성공 여부 기록
+    #     ├── page_list/
+    #     │   ├── area1.csv
+    #     │   ├── area2.csv
+    #     │   └── area3.csv
+    #     │   # 해당 지역의 매물 item_id와 수신 성공 여부 기록
+    #     ├── id_list/
+    #     │   ├── area1.csv
+    #     │   ├── area2.csv
+    #     │   └── area3.csv
+    #     │   # 매물 상세정보 기록
+    #     └── property_list/
+    #         ├── 2500001.txt
+    #         ├── 2500002.txt
+    #         └── 2500003.txt
+    #     """
+    #     # 파일 생성
+    #     id_list_dir = os.path.join(data_dir, "id_list")
+    #     id_list_csv_path = os.path.join(data_dir, id_list_dir, f"{area_id}.csv")
+    #     property_list_dir = os.path.join(data_dir, "property_list", f"{area_id}")
+    #     self.make_dir(property_list_dir)
+
+    #     # URL 설정 / 네이버 부동산은 모든 매물에 대해 통일된 주소를 사용
+    #     property_detail_url = "https://new.land.naver.com/api/articles/{}"
+
+    #     item_ids = self.get_item_ids(id_list_csv_path) # 매물 item_id 리스트 로딩
+    #     num_item_ids, progress_cnt = self.get_progress_infos(id_list_csv_path) # 진행도 체크용 변수
+
+    #     # 프록시 모드
+    #     if self.proxy_manager:
+    #         for item_id in item_ids:
+    #             progress_cnt += 1
+
+    #             # 사용 가능 프록시 개수 확인
+    #             if progress_cnt % print_log_cnt == 0:
+    #                 self.proxy_manager.check_blocked_proxy()
+
+    #             try:
+    #                 # 다음 대기 시간이 제일 빠른 세션 선택
+    #                 session_idx = self.proxy_manager.get_session_idx()
+    #                 session = self.proxy_manager.session_pool[session_idx]
+    #                 headers = self.proxy_manager.header_pool[session_idx]
+
+    #                 # 데이터 수신
+    #                 _property_detail_url = property_detail_url.format(item_id)
+    #                 response = session.get(
+    #                     _property_detail_url,
+    #                     params={"complexNo": ""},
+    #                     headers=headers
+    #                 )
+                
+    #                 if response.status_code == 200:
+    #                     data = response.json()
+    #                     self.save_property_datail(data, item_id, property_list_dir)
+    #                     # 성공 status 기록
+    #                     self.update_status("success", "item_id", item_id, id_list_csv_path)
+    #                     self.proxy_manager.update_proxy_status(session_idx, "success")
+    #                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
+                    
+    #                 else:
+    #                     # 실패 status 기록
+    #                     self.update_status("fail", "item_id", item_id, id_list_csv_path)
+    #                     self.proxy_manager.update_proxy_status(session_idx, "fail")
+    #                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
+            
+    #             except Exception as e:
+    #                 # 네트워크 중단 status 기록
+    #                 self.update_status("error", "item_id", item_id, id_list_csv_path)
+    #                 self.proxy_manager.update_proxy_status(session_idx, "error")
+    #                 print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")
+
+    #     # 기본 모드
+    #     else:
+    #         # 옵션 설정
+    #         headers = self.set_headers()
+    #         options = self.set_options(headless=True)
+
+    #         # cURL 설정
+    #         curl_format = "https://new.land.naver.com/houses?articleNo={}"
+
+    #         # 크롬 브라우저 자동 실행
+    #         # service = Service(ChromeDriverManager().install())
+    #         driver = webdriver.Chrome(service=self.service, options=options)
+
+    #         # 매물 정보 크롤링
+    #         for item_id in item_ids:
+    #             progress_cnt += 1
+
+    #             try:
+    #                 driver.get(curl_format.format(item_id))
+    #                 self.random_time_sleep(self.min_time, self.max_time)
+
+    #                 # cURL 추출
+    #                 c_headers = self.extract_curl_from_log(driver)
+    #                 if c_headers == None:
+    #                     # cURL 추출 실패 status 기록
+    #                     self.update_status(
+    #                         status="error",
+    #                         column_name="item_id",
+    #                         value=item_id, # 매물 고유 아이디
+    #                         csv_path=id_list_csv_path,
+    #                     )
+    #                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} cURL 정보 수신 실패")
+    #                     continue
+                    
+    #                 # 데이터 수신
+    #                 _property_detail_url = property_detail_url.format(item_id)
+    #                 response = requests.get(
+    #                     _property_detail_url,
+    #                     params={"complexNo": ""},
+    #                     headers=c_headers
+    #                 )
+                    
+    #                 if response.status_code == 200:
+    #                     data = response.json()
+    #                     self.save_property_datail(data, item_id, property_list_dir)
+    #                     # 성공 status 기록
+    #                     self.update_status("success", "item_id", item_id, id_list_csv_path)
+    #                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 완료 / url: {_property_detail_url}")
+                    
+    #                 else:
+    #                     # 실패 status 기록
+    #                     self.update_status("success", "item_id", item_id, id_list_csv_path)
+    #                     print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 매물 정보 수신 실패 / 상태 코드: {response.status_code}")
+            
+    #             except Exception as e:
+    #                 # 네트워크 중단 status 기록
+    #                 self.update_status("error", "item_id", item_id, id_list_csv_path)
+    #                 print(f"[{progress_cnt:06}/{num_item_ids:06}] {item_id} 페이지 요청 중 에러 발생 → {e}")

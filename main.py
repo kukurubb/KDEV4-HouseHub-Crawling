@@ -3,6 +3,7 @@ from proxy_manager import ProxyManager
 import pandas as pd
 import os
 import argparse
+import time as t
 
 if __name__ == "__main__":
     
@@ -33,20 +34,21 @@ if __name__ == "__main__":
     crawler = NaverCrawler(
         min_time=2,
         max_time=8,
+        print_log_cnt=50,
         proxy_manager=proxy_manager
     )
     
     # 설정값 입력
     area_name = "seoul"
     csv_path = r"D:\Kernel360_final_project\crawling\crawled_data\naver_seoul_v1\coordinates.csv"
-    data_dir = r"D:\Kernel360_final_project\crawling\crawled_data\naver_seoul_v1"
+    data_dir = r"D:\Kernel360_final_project\crawling\crawled_data\test3"
     
-    view = 16
+    view = 15
     coordinates = pd.read_csv(csv_path)
 
     for i in range(len(coordinates)):
 
-        if i != 7:
+        if i != 2:
             continue
         
         lat_idx = coordinates.loc[i, 'lat_idx']
@@ -56,7 +58,12 @@ if __name__ == "__main__":
         lon = coordinates.loc[i, 'longitude']
 
         # # 매물 id 크롤링
-        # crawler.crawl_item_ids(data_dir, area_id, lat, lon, view)
+        # crawler.crawl_item_ids(
+        #     data_dir,
+        #     area_id,
+        #     lat, lon, view,
+        #     max_threads=5
+        # )
 
         # # 중복 매물 id 제거
         # crawler.check_duplicate_property(
@@ -67,5 +74,16 @@ if __name__ == "__main__":
         #     area_name=area_name
         # )
 
+        start_t = t.time()
+
         # 매물 상세 정보 크롤링
-        crawler.crawl_property_datail(data_dir, area_id)
+        crawler.crawl_property_datails(
+            data_dir,
+            area_id,
+            max_threads=10
+        )
+
+        end_t = t.time()
+        test_t = end_t - start_t
+
+        print(f"소요시간: {test_t}")

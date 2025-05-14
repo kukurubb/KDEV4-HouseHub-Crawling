@@ -47,6 +47,7 @@ class ProxyManager:
             curl_format=curl_format,
             plugin_file_path_format=plugin_file_path_format
         )
+        self.check_blocked_proxy()
 
     def read_item_ids(self, item_id_txt_path):
         df = pd.read_csv(item_id_txt_path)
@@ -240,6 +241,7 @@ class ProxyManager:
         columns = [
             "session_idx",
             "is_blocked",
+            "is_occupied",
             "last_checked_time",
             "reserved_time",
             "last_delay_time",
@@ -252,7 +254,8 @@ class ProxyManager:
         df = df.astype({
             "session_idx": "int64",
             "is_blocked": "bool",
-            "last_checked_time": "float64",
+            "is_occupied": "bool",
+            "last_checked_time": "int64",
             "reserved_time": "float64",
             "last_delay_time": "float64",
             "consecutive_error_count": "int64"
@@ -261,14 +264,16 @@ class ProxyManager:
         for idx in range(len(session_pool)):
             session_idx = idx
             is_blocked = False
+            is_occupied = False
             last_checked_time = t.time()
             reserved_time = last_checked_time + round(random.uniform(min_time, max_time), 2)
-            last_delay_time = 0
+            last_delay_time = 0.0
             consecutive_error_count = 0
 
             df.loc[idx] = [
                 session_idx,
                 is_blocked,
+                is_occupied,
                 last_checked_time,
                 reserved_time,
                 last_delay_time,
@@ -290,58 +295,76 @@ class ProxyManager:
         처리해야하는 데이터
             "session_idx",
             "is_blocked",
+            "is_occupied",
             "last_checked_time",
             "reserved_time",
             "last_delay_time",
             "consecutive_error_count"
         """
-        df = self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx]
+        df = self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx].copy()
 
         if status == "success":
             # 차단 카운트 초기화
             df.loc[0, "consecutive_error_count"] = 0
-            
+
         elif status == "fail" or status == "error":
             """
             원래 차단과 에러인 경우를 분리해서 처리해야 함
             하지만 사이트에서 차단한 경우의 에러 코드가 뭔지 확인하지 못해서 하나의 경우로 통합 처리
             단순히 네트워크 지연인데 ip를 코드 내부적으로 block 처리해버리는 문제가 발생 가능
             """
-            
             # 차단 카운트 증가 및 차단 여부 확인
             df.loc[0, "consecutive_error_count"] += 1
             if df.loc[0, "consecutive_error_count"] >= self.block_cnt:
                 df.loc[0, "is_blocked"] = True
 
+        df.loc[0, "session_idx"] = session_idx
+        df.loc[0, "is_blocked"] = self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx, "is_blocked"].values[0]
+
+        # 점유 해제
+        df.loc[0, "is_occupied"] = False
         # 이전 크롤링 수행 시간(현재 시간)
         df.loc[0, "last_checked_time"] = t.time()
-        
         # 딜레이 시간 설정(이전 딜레이 시간과 유사하면 재수행)
         delay_time = round(random.uniform(self.min_time, self.max_time), 2)
         while abs(df.loc[0, "last_delay_time"] - delay_time) < 0.5:
             delay_time = round(random.uniform(self.min_time, self.max_time), 2)
         df.loc[0, "last_delay_time"] = delay_time
-
         # 다음 크롤링 수행 예정 시간(현재 시점 + 딜레이 시간)
         df.loc[0, "reserved_time"] = t.time() + df.loc[0, "last_delay_time"]
-
         # df 업데이트
-        self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx] = df
-
+        self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx] = df.loc[0].values.tolist()
         # reserved_time 기준으로 오름차순 정렬
-        self.proxy_status.sort_values(by='reserved_time', ascending=True, inplace=True, ignore_index=True)
+        self.proxy_status = self.proxy_status.sort_values(by='reserved_time', ascending=True, ignore_index=True)
 
     def get_session_idx(self):
-        current_time = t.time()
-        # reserved_time을 기준으로 오름차순 정렬되어 있기 때문에
-        # 첫번째 행의 데이터를 처리하면 됨
-        reserved_time = self.proxy_status.loc[0, "reserved_time"]
+        while True:
+            # 차단 당하거나 점유되지 않은 프록시 뽑기
+            df = self.proxy_status[
+                (self.proxy_status["is_blocked"] == False) &
+                (self.proxy_status["is_occupied"] == False)
+            ].reset_index(drop=True)
 
-        # 아직 예약 시간이 되지 않은 경우 남은 시간만큼 대기
-        if current_time < reserved_time:
-            t.sleep(reserved_time - current_time + 0.1)
+            # 사용 가능한 프록시가 없는 경우
+            if len(df) == 0:
+                print("사용 가능한 프록시가 없습니다. 0.5초 후 다시 확인합니다.")
+                t.sleep(0.5)
+                continue
 
-        return self.proxy_status.loc[0, "session_idx"]
+            # 뽑은 프록시 점유 설정
+            session_idx = df.loc[0, "session_idx"]
+            self.proxy_status.loc[self.proxy_status["session_idx"] == session_idx, "is_occupied"] = True
+
+            current_time = t.time()
+            # reserved_time을 기준으로 오름차순 정렬되어 있기 때문에
+            # 첫번째 행의 데이터를 처리하면 됨
+            reserved_time = df.loc[0, "reserved_time"]
+
+            # 아직 예약 시간이 되지 않은 경우 남은 시간만큼 대기
+            if current_time < reserved_time:
+                t.sleep(reserved_time - current_time + 0.1)
+
+            return int(df.loc[0, "session_idx"])
     
     def check_blocked_proxy(self):
         # 성공률 표시 추가
